@@ -13,29 +13,29 @@ const MONGO_URI = process.env.MONGO_URI;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID;
 
-// --- DATABASE ---
 mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ MongoDB Connected'))
   .catch(err => console.log('❌ DB Error:', err));
 
-// 1. Updated Booking Schema (Now stores Driver Name)
+// --- MODELS ---
 const BookingSchema = new mongoose.Schema({
     name: String,
     phone: String,
     vehicle: String,
     pickup: String,
     drop: String,
+    price: String, // NEW: Estimated Price
     status: { type: String, default: 'Pending' }, 
     driverPhone: { type: String, default: null },
-    driverName: { type: String, default: null }, // NEW FIELD
+    driverName: { type: String, default: null },
     createdAt: { type: Date, default: Date.now }
 });
 const Booking = mongoose.model('Booking', BookingSchema);
 
-// 2. Updated Driver Schema (Stores Name on Registration)
 const DriverSchema = new mongoose.Schema({
-    name: String, // NEW FIELD
+    name: String,
     phone: String,
+    vehicle: String, // NEW: Driver's Vehicle Type
     otp: String,
     otpExpires: Date
 });
@@ -43,62 +43,73 @@ const Driver = mongoose.model('Driver', DriverSchema);
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
 
-app.get('/', (req, res) => res.send('🛺 Tavarekere Logistics Backend v3'));
-
 // --- ROUTES ---
 
-// LOGIN: Now accepts "name" to register new drivers
+// 1. LOGIN (No Time Restriction, Added Vehicle)
 app.post('/api/driver/login', async (req, res) => {
-    const { phone, name } = req.body;
+    const { phone, name, vehicle } = req.body;
     const generatedOtp = Math.floor(1000 + Math.random() * 9000).toString(); 
     
-    // Save Name and OTP
     await Driver.findOneAndUpdate(
         { phone }, 
-        { otp: generatedOtp, otpExpires: Date.now() + 300000, name: name }, // Update name if provided
+        { otp: generatedOtp, otpExpires: Date.now() + 300000, name: name, vehicle: vehicle }, 
         { upsert: true, new: true }
     );
     
-    bot.sendMessage(OWNER_CHAT_ID, `🔐 *LOGIN REQUEST*\nName: ${name}\nPhone: ${phone}\nOTP: *${generatedOtp}*`, { parse_mode: 'Markdown' });
+    bot.sendMessage(OWNER_CHAT_ID, `🔐 *LOGIN REQUEST*\nName: ${name}\nVehicle: ${vehicle}\nPhone: ${phone}\nOTP: *${generatedOtp}*`, { parse_mode: 'Markdown' });
     res.json({ success: true });
 });
 
 app.post('/api/driver/verify', async (req, res) => {
     const { phone, otp } = req.body;
     const driver = await Driver.findOne({ phone });
-    
     if (!driver || driver.otp !== otp) return res.json({ success: false });
-    
-    // Send back the driver's name so the Frontend remembers it
-    res.json({ success: true, name: driver.name });
+    // Return vehicle so frontend knows what jobs to show
+    res.json({ success: true, name: driver.name, vehicle: driver.vehicle });
 });
 
 app.post('/api/book', async (req, res) => {
     try {
         const booking = new Booking(req.body);
         await booking.save();
-        bot.sendMessage(OWNER_CHAT_ID, `🚨 *NEW BOOKING*\n👤 ${booking.name}\n📞 ${booking.phone}\n📍 ${booking.pickup} ➡️ ${booking.drop}`);
+        bot.sendMessage(OWNER_CHAT_ID, `🚨 *NEW BOOKING (${booking.vehicle})*\n💰 Est: ${booking.price}\n👤 ${booking.name}\n📞 ${booking.phone}\n📍 ${booking.pickup} ➡️ ${booking.drop}`);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// 2. GET JOBS (Filtered by Vehicle)
 app.get('/api/jobs', async (req, res) => {
-    const jobs = await Booking.find({ status: 'Pending' }).sort({ createdAt: -1 });
+    const { vehicle } = req.query; // Get vehicle type from URL
+    const query = { status: 'Pending' };
+    
+    // If a vehicle is specified, only show jobs for that vehicle
+    if (vehicle) {
+        query.vehicle = vehicle;
+    }
+
+    const jobs = await Booking.find(query).sort({ createdAt: -1 });
     res.json(jobs);
 });
 
-// ACCEPT: Now saves Driver Name too
 app.post('/api/accept', async (req, res) => {
     const { bookingId, driverPhone, driverName } = req.body;
     await Booking.findByIdAndUpdate(bookingId, { status: 'Assigned', driverPhone, driverName });
-    bot.sendMessage(OWNER_CHAT_ID, `✅ *Job Accepted*\nDriver: ${driverName} (${driverPhone})`);
+    bot.sendMessage(OWNER_CHAT_ID, `✅ *Job Accepted*\nDriver: ${driverName}`);
     res.json({ success: true });
 });
 
 app.post('/api/complete', async (req, res) => {
     const { bookingId } = req.body;
     await Booking.findByIdAndUpdate(bookingId, { status: 'Completed' });
-    bot.sendMessage(OWNER_CHAT_ID, `🏁 *Job Completed*\nRide finished successfully.`);
+    bot.sendMessage(OWNER_CHAT_ID, `🏁 *Job Completed*`);
+    res.json({ success: true });
+});
+
+// 3. CANCEL BOOKING (New Option)
+app.post('/api/cancel', async (req, res) => {
+    const { bookingId } = req.body;
+    await Booking.findByIdAndUpdate(bookingId, { status: 'Cancelled' });
+    bot.sendMessage(OWNER_CHAT_ID, `❌ *Job Cancelled*`);
     res.json({ success: true });
 });
 
