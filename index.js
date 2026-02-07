@@ -18,21 +18,23 @@ mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ MongoDB Connected'))
   .catch(err => console.log('❌ DB Error:', err));
 
-// Updated Booking Schema (Added driverPhone)
+// 1. Updated Booking Schema (Now stores Driver Name)
 const BookingSchema = new mongoose.Schema({
     name: String,
     phone: String,
     vehicle: String,
     pickup: String,
     drop: String,
-    status: { type: String, default: 'Pending' }, // Pending, Assigned, Completed
-    driverPhone: { type: String, default: null }, // Who took the job?
+    status: { type: String, default: 'Pending' }, 
+    driverPhone: { type: String, default: null },
+    driverName: { type: String, default: null }, // NEW FIELD
     createdAt: { type: Date, default: Date.now }
 });
 const Booking = mongoose.model('Booking', BookingSchema);
 
-// Driver Schema (For Login)
+// 2. Updated Driver Schema (Stores Name on Registration)
 const DriverSchema = new mongoose.Schema({
+    name: String, // NEW FIELD
     phone: String,
     otp: String,
     otpExpires: Date
@@ -41,32 +43,36 @@ const Driver = mongoose.model('Driver', DriverSchema);
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
 
-app.get('/', (req, res) => res.send('🛺 Tavarekere Logistics Backend v2'));
+app.get('/', (req, res) => res.send('🛺 Tavarekere Logistics Backend v3'));
 
 // --- ROUTES ---
 
-// 1. Generate OTP
+// LOGIN: Now accepts "name" to register new drivers
 app.post('/api/driver/login', async (req, res) => {
-    const { phone } = req.body;
+    const { phone, name } = req.body;
     const generatedOtp = Math.floor(1000 + Math.random() * 9000).toString(); 
+    
+    // Save Name and OTP
     await Driver.findOneAndUpdate(
         { phone }, 
-        { otp: generatedOtp, otpExpires: Date.now() + 300000 }, 
+        { otp: generatedOtp, otpExpires: Date.now() + 300000, name: name }, // Update name if provided
         { upsert: true, new: true }
     );
-    bot.sendMessage(OWNER_CHAT_ID, `🔐 *LOGIN REQUEST*\nDriver: ${phone}\nOTP: *${generatedOtp}*`, { parse_mode: 'Markdown' });
+    
+    bot.sendMessage(OWNER_CHAT_ID, `🔐 *LOGIN REQUEST*\nName: ${name}\nPhone: ${phone}\nOTP: *${generatedOtp}*`, { parse_mode: 'Markdown' });
     res.json({ success: true });
 });
 
-// 2. Verify OTP
 app.post('/api/driver/verify', async (req, res) => {
     const { phone, otp } = req.body;
     const driver = await Driver.findOne({ phone });
+    
     if (!driver || driver.otp !== otp) return res.json({ success: false });
-    res.json({ success: true });
+    
+    // Send back the driver's name so the Frontend remembers it
+    res.json({ success: true, name: driver.name });
 });
 
-// 3. New Booking
 app.post('/api/book', async (req, res) => {
     try {
         const booking = new Booking(req.body);
@@ -76,21 +82,19 @@ app.post('/api/book', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 4. Get Pending Jobs (For Duty Board)
 app.get('/api/jobs', async (req, res) => {
     const jobs = await Booking.find({ status: 'Pending' }).sort({ createdAt: -1 });
     res.json(jobs);
 });
 
-// 5. Accept Job (UPDATED: Saves Driver Phone)
+// ACCEPT: Now saves Driver Name too
 app.post('/api/accept', async (req, res) => {
-    const { bookingId, driverPhone } = req.body;
-    await Booking.findByIdAndUpdate(bookingId, { status: 'Assigned', driverPhone });
-    bot.sendMessage(OWNER_CHAT_ID, `✅ *Job Accepted*\nDriver ${driverPhone} is on the way.`);
+    const { bookingId, driverPhone, driverName } = req.body;
+    await Booking.findByIdAndUpdate(bookingId, { status: 'Assigned', driverPhone, driverName });
+    bot.sendMessage(OWNER_CHAT_ID, `✅ *Job Accepted*\nDriver: ${driverName} (${driverPhone})`);
     res.json({ success: true });
 });
 
-// 6. Complete Job (NEW!)
 app.post('/api/complete', async (req, res) => {
     const { bookingId } = req.body;
     await Booking.findByIdAndUpdate(bookingId, { status: 'Completed' });
@@ -98,14 +102,12 @@ app.post('/api/complete', async (req, res) => {
     res.json({ success: true });
 });
 
-// 7. Get Driver's Specific History (NEW!)
 app.get('/api/driver/history', async (req, res) => {
     const { phone } = req.query;
     const jobs = await Booking.find({ driverPhone: phone }).sort({ createdAt: -1 });
     res.json(jobs);
 });
 
-// 8. Get All Admin Data (NEW!)
 app.get('/api/admin/all', async (req, res) => {
     const jobs = await Booking.find({}).sort({ createdAt: -1 });
     res.json(jobs);
